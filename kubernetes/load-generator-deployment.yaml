@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  namespace: otel-demo
+  labels:
+    app: load-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-generator
+  template:
+    metadata:
+      labels:
+        app: load-generator
+    spec:
+      containers:
+      - name: load-generator
+        image: load-generator:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: APP_URL
+          value: "http://otel-demo-app:8080"
+        - name: REQUESTS_PER_SECOND
+          value: "10"
+        - name: NUM_WORKERS
+          value: "5"
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi 

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: otel-demo
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.96.0
+        args:
+        - --config=/conf/otel-collector-config.yaml
+        env:
+        - name: ELASTIC_APM_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: elastic-cloud-credentials
+              key: elastic-apm-endpoint
+        - name: ELASTIC_APM_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: elastic-cloud-credentials
+              key: elastic-apm-token
+        ports:
+        - containerPort: 4317 # OTLP gRPC
+          name: otlp-grpc
+        - containerPort: 4318 # OTLP HTTP
+          name: otlp-http
+        volumeMounts:
+        - name: otel-collector-config-volume
+          mountPath: /conf
+        resources:
+          limits:
+            cpu: 500m
+            memory: 500Mi
+          requests:
+            cpu: 200m
+            memory: 200Mi
+      volumes:
+      - name: otel-collector-config-volume
+        configMap:
+          name: otel-collector-config
+          items:
+          - key: otel-collector-config.yaml
+            path: otel-collector-config.yaml 

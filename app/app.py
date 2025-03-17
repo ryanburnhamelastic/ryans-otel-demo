@@ -21,24 +21,55 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 
-# Custom JSON formatter for rich elasticsearch logs
-class JsonFormatter(logging.Formatter):
+# Custom JSON formatter for ECS-compatible logs
+class EcsJsonFormatter(logging.Formatter):
     def format(self, record):
+        # Standard ECS fields
+        timestamp = datetime.datetime.utcnow().isoformat() + "Z"
+        ecs_version = "1.12.0"  # Using current ECS version
+        
+        # Build ECS-compliant log record
         log_record = {
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-            "severity": record.levelname,
+            "@timestamp": timestamp,
+            "ecs": {
+                "version": ecs_version
+            },
+            "log": {
+                "level": record.levelname.lower(),  # ECS uses lowercase level names
+                "logger": record.name,
+                "origin": {
+                    "file": {
+                        "name": os.path.basename(record.pathname),
+                        "line": record.lineno
+                    },
+                    "function": record.funcName
+                }
+            },
             "message": record.getMessage(),
-            "logger": record.name,
-            "module": record.module,
-            "function": record.funcName,
-            "line_number": record.lineno,
-            "path": record.pathname,
-            "process_id": record.process,
-            "thread_id": record.thread,
-            "thread_name": record.threadName,
-            "host": socket.gethostname(),
-            "environment": os.getenv("DEPLOYMENT_ENVIRONMENT", "production"),
-            "service": "otel-demo-app"
+            "process": {
+                "pid": record.process,
+                "thread": {
+                    "id": record.thread,
+                    "name": record.threadName
+                }
+            },
+            "host": {
+                "hostname": socket.gethostname(),
+                "os": {
+                    "platform": platform.system(),
+                    "version": platform.release(),
+                    "name": platform.system()
+                }
+            },
+            "service": {
+                "name": "otel-demo-app",
+                "version": "1.0.0",
+                "environment": os.getenv("DEPLOYMENT_ENVIRONMENT", "production")
+            },
+            "event": {
+                "created": timestamp,
+                "module": record.module
+            }
         }
         
         # Add trace context if available
@@ -46,25 +77,83 @@ class JsonFormatter(logging.Formatter):
         if hasattr(current_span, "get_span_context"):
             ctx = current_span.get_span_context()
             if ctx.is_valid:
-                log_record["trace_id"] = format(ctx.trace_id, '032x')
-                log_record["span_id"] = format(ctx.span_id, '016x')
+                trace_id = format(ctx.trace_id, '032x')
+                span_id = format(ctx.span_id, '016x')
+                
+                # Add trace info in ECS format
+                if "trace" not in log_record:
+                    log_record["trace"] = {}
+                log_record["trace"]["id"] = trace_id
+                
+                if "span" not in log_record:
+                    log_record["span"] = {}
+                log_record["span"]["id"] = span_id
         
         # Add request context if available
         if hasattr(g, 'request_id'):
-            log_record["request_id"] = g.request_id
+            if "transaction" not in log_record:
+                log_record["transaction"] = {}
+            log_record["transaction"]["id"] = g.request_id
+            
+            # Add HTTP request details if this is a web request
+            if request:
+                if "http" not in log_record:
+                    log_record["http"] = {
+                        "request": {
+                            "method": request.method,
+                            "body": {
+                                "bytes": request.content_length or 0
+                            }
+                        }
+                    }
+                    
+                    if "url" not in log_record["http"]:
+                        log_record["http"]["url"] = {}
+                    
+                    log_record["http"]["url"]["path"] = request.path
+                    log_record["http"]["url"]["query"] = request.query_string.decode('utf-8') if request.query_string else ""
+                    log_record["http"]["url"]["original"] = request.url
+                    
+                    if "client" not in log_record:
+                        log_record["client"] = {}
+                    
+                    log_record["client"]["ip"] = request.headers.get('X-Forwarded-For', request.remote_addr)
+                    log_record["client"]["user_agent"] = {"original": request.headers.get('User-Agent', 'Unknown')}
         
         # Add any exception info
         if record.exc_info:
-            log_record["exception"] = {
-                "type": record.exc_info[0].__name__,
-                "message": str(record.exc_info[1]),
-                "stacktrace": traceback.format_exception(*record.exc_info)
-            }
+            exception_type = record.exc_info[0].__name__
+            exception_message = str(record.exc_info[1])
+            exception_stacktrace = traceback.format_exception(*record.exc_info)
+            
+            if "error" not in log_record:
+                log_record["error"] = {}
+            
+            log_record["error"]["type"] = exception_type
+            log_record["error"]["message"] = exception_message
+            log_record["error"]["stack_trace"] = exception_stacktrace
         
         # Add extra fields from record
         if hasattr(record, "extra_fields"):
             for key, value in record.extra_fields.items():
-                log_record[key] = value
+                # Handle special ECS fields
+                if key == "event_type":
+                    if "event" not in log_record:
+                        log_record["event"] = {}
+                    log_record["event"]["type"] = value
+                elif key == "error_type" and "error" not in log_record:
+                    log_record["error"] = {"type": value}
+                elif key == "error_details" and "error" in log_record:
+                    log_record["error"]["message"] = value
+                elif key == "duration_ms":
+                    if "event" not in log_record:
+                        log_record["event"] = {}
+                    log_record["event"]["duration"] = value * 1000000  # ms to nanoseconds per ECS
+                else:
+                    # Put custom fields under labels or custom namespace
+                    if "labels" not in log_record:
+                        log_record["labels"] = {}
+                    log_record["labels"][key] = value
         
         return json.dumps(log_record)
 
@@ -76,9 +165,9 @@ logger = logging.getLogger("otel-demo-app")
 for handler in logger.handlers[:]:
     logger.removeHandler(handler)
 
-# Create console handler with JSON formatter
+# Create console handler with ECS JSON formatter
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(JsonFormatter())
+console_handler.setFormatter(EcsJsonFormatter())
 logger.addHandler(console_handler)
 
 # Set up OpenTelemetry resource
